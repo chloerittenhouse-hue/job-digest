@@ -1,0 +1,53 @@
+name: Job Digest
+
+on:
+  schedule:
+    # Runs at 8:00 AM Mountain Time (14:00 UTC) every two days.
+    # Cron runs on the 1st, 3rd, 5th … day of each month — close enough to
+    # "every 2 days" for a job digest.
+    - cron: "0 14 */2 * *"
+
+  # Lets you trigger a run manually from the GitHub Actions tab at any time.
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # required to commit the updated seen_jobs.json back
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run job digest
+        env:
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python job_digest.py
+
+      - name: Commit updated state file
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add seen_jobs.json
+          # Only commit if the file actually changed; [skip ci] prevents a
+          # recursive workflow trigger.
+          git diff --staged --quiet || git commit -m "chore: update digest state [skip ci]"
+          git push

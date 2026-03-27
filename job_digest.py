@@ -84,26 +84,33 @@ log = logging.getLogger(__name__)
 # Job classification rules
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Title substrings that qualify a listing as an EMT/clinical role
+# Title substrings that qualify a listing as an EMT/clinical role.
+# "emt" and "wfr" use word-boundary regex (see classify()) to avoid
+# substring matches like "cement" or "dwfr".
 EMT_TITLE_INCLUDE = [
-    "emt", "emergency medical technician",
+    "emt",                              # matched with \b word boundary
+    "emergency medical technician",
     "er tech", "ed tech",
     "emergency department tech", "emergency room tech",
-    "trauma tech", "emergency tech",
+    "trauma tech",
     "urgent care tech", "urgent care technician",
     "ski patrol",
     "search and rescue", "sar tech",
-    "flight medic", "flight crew",
-    "wilderness first responder", "wfr",
+    "flight medic",                     # intentionally excludes generic "flight crew"
+    "wilderness first responder", "wfr",  # wfr matched with \b word boundary
     "critical care tech",
 ]
 
-# Description substrings used as fallback when title doesn't match
+# Description-only fallback: credential terms that confirm EMT is required/preferred.
+# Deliberately narrow — "emergency medical" and "first responder" are omitted because
+# they also appear in fitness, security, and facility-management job descriptions.
 EMT_DESC_INCLUDE = [
-    "emt", "emt-b", "emt-basic", "emt-advanced", "emt-iv",
-    "emergency medical technician", "emergency medical",
-    "paramedic", "first responder",
-    "wilderness first responder",
+    r"\bemt\b",
+    r"\bemt-b\b", r"\bemt-basic\b", r"\bemt-advanced\b", r"\bemt-iv\b",
+    r"\bemergency medical technician\b",
+    r"\bparamedic\b",
+    r"\bwilderness first responder\b",
+    r"\bwfr\b",
 ]
 
 # PA title substrings
@@ -126,6 +133,11 @@ EXCLUDE_TITLE_HARD = [
     "ambulance driver", "transport driver", "transport technician",
     "ems transport", "basic life support transport", "bls transport",
     "firefighter", "fire fighter", "wildland fire", "fire protection officer",
+    # Common false-positive technical roles
+    "electrical", "electrician", "hvac", "plumber", "plumbing",
+    "fitness coordinator", "fitness director", "personal trainer",
+    "information technology", "it technician", "it tech",
+    "facility tech", "maintenance tech", "installation tech",
 ]
 
 # Work-type substrings that indicate remote/hybrid
@@ -176,13 +188,31 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Op
 
     # EMT/Clinical classification ──────────────────────────────────────────────
     for kw in EMT_TITLE_INCLUDE:
-        if kw in t:
+        if kw in ("emt", "wfr"):
+            # Word-boundary match: "emt" must not be a substring of another word
+            if re.search(r"\b" + re.escape(kw) + r"\b", t):
+                return "emt_clinical"
+        elif kw in t:
             return "emt_clinical"
 
-    # Fallback: description scan
+    # Description-only fallback ────────────────────────────────────────────────
+    # Only qualify if an EMT/paramedic credential is explicitly required OR
+    # preferred — not just mentioned in passing (e.g. "call EMT if injured").
     desc = description.lower()
-    for kw in EMT_DESC_INCLUDE:
-        if kw in desc:
+    cred_in_desc = any(re.search(pat, desc) for pat in EMT_DESC_INCLUDE)
+    if cred_in_desc:
+        # Require the credential to appear near a requirement/preference signal
+        requirement_context = re.search(
+            r"\bemt\b.{0,120}\b(?:required|preferred|certification|licensed|certified|must have|minimum)\b"
+            r"|\b(?:required|preferred|must have|minimum).{0,120}\bemt\b"
+            r"|\bparamedic\b.{0,80}\b(?:required|preferred|certification|licensed|certified)\b"
+            r"|\b(?:required|preferred).{0,80}\bparamedic\b"
+            r"|\bwilderness first responder\b.{0,80}\b(?:required|preferred|wfr)\b"
+            r"|\b(?:required|preferred).{0,80}\bwilderness first responder\b",
+            desc,
+            re.IGNORECASE,
+        )
+        if requirement_context:
             return "emt_clinical"
 
     return None
@@ -190,8 +220,9 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Op
 
 def _requires_ma_cna_without_emt(combined_text: str) -> bool:
     """Return True only when MA/CNA is strictly required AND no EMT path is offered."""
-    emt_signals = ["emt", "emergency medical", "first responder", "paramedic", "wilderness"]
-    if any(s in combined_text for s in emt_signals):
+    # Use word-boundary match for "emt" so "cement" doesn't trigger a false negative
+    emt_signals = [r"\bemt\b", r"\bparamedic\b", r"\bwilderness\b"]
+    if any(re.search(sig, combined_text) for sig in emt_signals):
         return False  # EMT can fill the role → keep it
 
     for pat in MA_CNA_REQUIRED_PATTERNS:

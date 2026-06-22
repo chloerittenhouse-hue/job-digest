@@ -2,8 +2,8 @@
 """
 Job Digest Agent
 ════════════════
-Finds EMT/Clinical and Physician Assistant job listings within 50 miles of
-Palisade, CO and emails a formatted HTML digest.
+Finds EMT/Clinical, Paramedic, Medical Assistant, and Physician Assistant job
+listings within 50 miles of Palisade, CO and emails a formatted HTML digest.
 
 Runs automatically via GitHub Actions every two days.
 """
@@ -54,7 +54,7 @@ EMAIL_RECIPIENTS: List[str] = [
 ]
 
 EMAIL_SENDER  = "ChloeRittenhouse@gmail.com"
-EMAIL_SUBJECT = "Job Digest — EMT/Clinical & PA Roles within 50mi of Palisade, CO"
+EMAIL_SUBJECT = "Job Digest — EMT/Clinical, Paramedic, MA & PA Roles within 50mi of Palisade, CO"
 
 # Geography
 PALISADE_COORDS    = (39.1086, -108.3481)   # lat/lon of Palisade, CO
@@ -113,12 +113,71 @@ EMT_DESC_INCLUDE = [
     r"\bwfr\b",
 ]
 
+# Paramedic title substrings. "emt-p" is a safe substring; the short abbreviations
+# in PARAMEDIC_TITLE_ABBR are matched with \b word boundaries (see classify()) to
+# avoid matching inside unrelated words.
+PARAMEDIC_TITLE_INCLUDE = [
+    "paramedic",                        # covers "flight paramedic", "community paramedic", etc.
+    "emt-p", "emt-paramedic",
+    "critical care paramedic",
+]
+PARAMEDIC_TITLE_ABBR = [
+    "ccp",                              # critical care paramedic
+]
+
+# Medical Assistant title substrings. Short credential abbreviations in
+# MA_TITLE_ABBR are matched with \b word boundaries to avoid matching inside
+# words like "pharma" (which contains "rma").
+MA_TITLE_INCLUDE = [
+    "medical assistant",
+    "certified medical assistant",
+    "registered medical assistant",
+    "clinical medical assistant",
+]
+MA_TITLE_ABBR = [
+    "cma", "rma", "ma-c",
+]
+
+# Within the Medical Assistant category, distinguish listings where a national
+# certification (CMA / RMA / "nationally certified") is clearly REQUIRED from
+# those where it is merely preferred / optional / not required. Matched against
+# the description (case-insensitive). Anything ambiguous falls into the
+# "preferred / not required" bucket so the "required" bucket stays high-confidence.
+CMA_REQUIRED_PATTERNS = [
+    r"\bcma\b.{0,60}\brequired\b",
+    r"\brequired\b.{0,60}\bcma\b",
+    r"\bcertified medical assistant\b.{0,60}\brequired\b",
+    r"\brequired\b.{0,60}\bcertified medical assistant\b",
+    r"\b(?:national|nationally)\b.{0,40}\bcertif\w+.{0,20}\brequired\b",
+    r"\b(?:national|nationally)\s+certif\w+\s+required\b",
+    r"\bcertification\s+required\b",
+    r"\bmust\s+(?:be\s+)?(?:a\s+)?(?:nationally\s+)?certif\w+",
+    r"\bmust\s+(?:have|hold|possess)\b.{0,40}\b(?:cma|rma|certification)\b",
+    r"\bcma\s*\(?aama\)?\b.{0,40}\brequired\b",
+]
+# Signals that certification is optional → keep in the "preferred / not required"
+# bucket even if a "required" word appears elsewhere (e.g. "CMA preferred, BLS required").
+CMA_OPTIONAL_PATTERNS = [
+    r"\bcertification\s+(?:is\s+)?preferred\b",
+    r"\bcma\b.{0,30}\bpreferred\b",
+    r"\bpreferred\b.{0,30}\b(?:cma|certification)\b",
+    r"\bcertification\s+(?:is\s+)?not\s+required\b",
+    r"\bno\s+certification\s+required\b",
+    r"\bwilling\s+to\s+train\b",
+    r"\bor\s+equivalent\b",
+    r"\bregistered\s+or\s+certified\b",
+    r"\bcertified\s+or\s+registered\b",
+]
+
 # PA title substrings
 PA_TITLE_INCLUDE = [
     "physician assistant", "pa-c", "physician associate",
 ]
 
-# Regex patterns that indicate a strict MA/CNA requirement (no EMT path offered)
+# Regex patterns that indicate a strict MA/CNA requirement (no EMT path offered).
+# NOTE: This only gates the EMT/PA classification paths now that Medical Assistant
+# is a desired role in its own right — MA-titled listings are classified before
+# this exclusion is consulted (see classify()).
 MA_CNA_REQUIRED_PATTERNS = [
     r"(?:cna|certified nursing assistant)\b.{0,80}required",
     r"(?:medical assistant|(?<!\w)ma(?!\w)).{0,80}required",
@@ -140,10 +199,18 @@ EXCLUDE_TITLE_HARD = [
     "facility tech", "maintenance tech", "installation tech",
 ]
 
-# Work-type substrings that indicate remote/hybrid
+# Work-type substrings that indicate remote/hybrid (checked against the full
+# combined text: title + description + employment type).
 EXCLUDE_REMOTE_KEYWORDS = [
     "remote", "hybrid", "work from home", "wfh",
     "telehealth only", "virtual only", "fully virtual",
+]
+
+# Title-only remote/online signals. Checked against the title alone so that a
+# description mentioning "apply online" doesn't wrongly exclude an in-person job,
+# while titles like "Online Medical Assistant" or "Virtual Paramedic" are dropped.
+EXCLUDE_TITLE_REMOTE = [
+    "online", "virtual", "telehealth", "remote", "work from home", "wfh",
 ]
 
 
@@ -152,10 +219,25 @@ def _txt(*parts: Optional[str]) -> str:
     return " ".join((p or "").lower() for p in parts)
 
 
+def _matches_any(text: str, substrings: List[str]) -> bool:
+    """True if any plain substring appears in text."""
+    return any(kw in text for kw in substrings)
+
+
+def _matches_any_word(text: str, words: List[str]) -> bool:
+    """True if any term matches text on \\b word boundaries (safe for abbreviations)."""
+    return any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in words)
+
+
 def classify(title: str, description: str = "", employment_type: str = "") -> Optional[str]:
     """
     Classify a job listing.
-    Returns 'emt_clinical', 'pa', or None (exclude).
+    Returns 'emt_clinical', 'paramedic', 'ma_cma_required', 'ma', 'pa',
+    or None (exclude).
+
+    Medical Assistant listings split into:
+      • 'ma_cma_required' — national certification (CMA/RMA) clearly required
+      • 'ma'              — certification preferred / optional / not required
     """
     combined = _txt(title, description, employment_type)
     t = title.lower()
@@ -164,6 +246,11 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Op
 
     for kw in EXCLUDE_REMOTE_KEYWORDS:
         if kw in combined:
+            return None
+
+    # Title-level online/virtual exclusion (e.g. "Online Medical Assistant")
+    for kw in EXCLUDE_TITLE_REMOTE:
+        if kw in t:
             return None
 
     for kw in EXCLUDE_TITLE_HARD:
@@ -177,7 +264,20 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Op
     if re.search(r"\b(?:ambulance|transport)\b", t) and "flight" not in t:
         return None
 
-    # Exclude if strict MA/CNA required and no EMT path exists
+    # Paramedic classification ──────────────────────────────────────────────────
+    # Checked before the MA/CNA exclusion and EMT path so paramedic-titled roles
+    # land in their own category.
+    if _matches_any(t, PARAMEDIC_TITLE_INCLUDE) or _matches_any_word(t, PARAMEDIC_TITLE_ABBR):
+        return "paramedic"
+
+    # Medical Assistant classification ───────────────────────────────────────────
+    # Checked before the MA/CNA "required" exclusion because Medical Assistant is
+    # now a desired role rather than a disqualifier. Split by whether a national
+    # certification is clearly required vs preferred/optional.
+    if _matches_any(t, MA_TITLE_INCLUDE) or _matches_any_word(t, MA_TITLE_ABBR):
+        return "ma_cma_required" if _cma_required(title, description) else "ma"
+
+    # Exclude if strict MA/CNA required and no EMT path exists (gates EMT/PA only)
     if _requires_ma_cna_without_emt(combined):
         return None
 
@@ -229,6 +329,23 @@ def _requires_ma_cna_without_emt(combined_text: str) -> bool:
         if re.search(pat, combined_text, re.IGNORECASE):
             return True
     return False
+
+
+def _cma_required(title: str, description: str) -> bool:
+    """
+    For a Medical Assistant listing, return True only when a national
+    certification (CMA/RMA) is CLEARLY required.
+
+    An explicit "preferred / not required / willing to train" signal wins over a
+    stray "required" elsewhere, so ambiguous listings fall into the general
+    (preferred/optional) bucket rather than the high-confidence "required" one.
+    """
+    text = _txt(title, description)
+
+    if any(re.search(pat, text, re.IGNORECASE) for pat in CMA_OPTIONAL_PATTERNS):
+        return False
+
+    return any(re.search(pat, text, re.IGNORECASE) for pat in CMA_REQUIRED_PATTERNS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +449,16 @@ _JOBSPY_QUERIES = [
         'OR "ski patrol" OR "urgent care tech" OR "trauma tech" '
         'OR "emergency department tech" OR "wilderness first responder"',
         "emt_clinical",
+    ),
+    (
+        'Paramedic OR "EMT-P" OR "flight paramedic" '
+        'OR "community paramedic" OR "critical care paramedic"',
+        "paramedic",
+    ),
+    (
+        '"Medical Assistant" OR "Certified Medical Assistant" '
+        'OR "Clinical Medical Assistant" OR "Registered Medical Assistant" OR CMA',
+        "ma",
     ),
     ('"Physician Assistant" OR "PA-C" OR "physician associate"', "pa"),
 ]
@@ -457,6 +584,7 @@ def _scrape_intermountain() -> List[Job]:
     base = "https://careers.intermountainhealth.org"
     searches = [
         "EMT", "ER Tech", "emergency technician",
+        "Paramedic", "Medical Assistant",
         "Physician Assistant", "ski patrol", "urgent care",
     ]
 
@@ -528,6 +656,7 @@ def _scrape_commonspirit() -> List[Job]:
     jobs: List[Job] = []
     searches = [
         "EMT", "ER Tech", "emergency technician",
+        "Paramedic", "Medical Assistant",
         "Physician Assistant", "urgent care tech",
     ]
 
@@ -693,10 +822,16 @@ def _section_html(heading: str, jobs: List[Job], seen_ids: Set[str]) -> str:
 
 def build_email_html(new_jobs: List[Job], active_jobs: List[Job], seen_ids: Set[str]) -> str:
     today     = datetime.now(timezone.utc).strftime("%B %-d, %Y")
-    emt_new    = [j for j in new_jobs    if j.category == "emt_clinical"]
-    pa_new     = [j for j in new_jobs    if j.category == "pa"]
-    emt_active = [j for j in active_jobs if j.category == "emt_clinical"]
-    pa_active  = [j for j in active_jobs if j.category == "pa"]
+    emt_new        = [j for j in new_jobs    if j.category == "emt_clinical"]
+    para_new       = [j for j in new_jobs    if j.category == "paramedic"]
+    ma_req_new     = [j for j in new_jobs    if j.category == "ma_cma_required"]
+    ma_pref_new    = [j for j in new_jobs    if j.category == "ma"]
+    pa_new         = [j for j in new_jobs    if j.category == "pa"]
+    emt_active     = [j for j in active_jobs if j.category == "emt_clinical"]
+    para_active    = [j for j in active_jobs if j.category == "paramedic"]
+    ma_req_active  = [j for j in active_jobs if j.category == "ma_cma_required"]
+    ma_pref_active = [j for j in active_jobs if j.category == "ma"]
+    pa_active      = [j for j in active_jobs if j.category == "pa"]
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -712,7 +847,7 @@ def build_email_html(new_jobs: List[Job], active_jobs: List[Job], seen_ids: Set[
   <div style="background:linear-gradient(135deg,#1e3a5f 0%,#1d4ed8 100%);border-radius:12px;padding:28px 24px;margin-bottom:20px;">
     <h1 style="margin:0 0 6px;color:#fff;font-size:20px;font-weight:700;">🩺 Job Digest</h1>
     <p style="margin:0;color:#bfdbfe;font-size:13px;">
-      EMT/Clinical &amp; PA Roles &nbsp;·&nbsp; Within 50 miles of Palisade, CO &nbsp;·&nbsp; {today}
+      EMT/Clinical, Paramedic, Medical Assistant &amp; PA Roles &nbsp;·&nbsp; Within 50 miles of Palisade, CO &nbsp;·&nbsp; {today}
     </p>
   </div>
 
@@ -728,6 +863,9 @@ def build_email_html(new_jobs: List[Job], active_jobs: List[Job], seen_ids: Set[
   <p style="font-size:12px;color:#6b7280;margin:0 0 14px;">Listings added or updated since the previous run</p>
 
   {_section_html("🚑 EMT / Clinical Roles", emt_new, seen_ids)}
+  {_section_html("🚑 Paramedic Roles", para_new, seen_ids)}
+  {_section_html("🩹 Medical Assistant Roles — CMA Required", ma_req_new, seen_ids)}
+  {_section_html("🩹 Medical Assistant Roles — CMA Preferred / Not Required", ma_pref_new, seen_ids)}
   {_section_html("🩺 Physician Assistant Roles", pa_new, seen_ids)}
 
   <!-- ═══ SECTION 2: Active in the last 30 days ═══ -->
@@ -735,6 +873,9 @@ def build_email_html(new_jobs: List[Job], active_jobs: List[Job], seen_ids: Set[
   <p style="font-size:12px;color:#6b7280;margin:0 0 14px;">Open listings from the past 30 days (previously reported)</p>
 
   {_section_html("🚑 EMT / Clinical Roles", emt_active, seen_ids)}
+  {_section_html("🚑 Paramedic Roles", para_active, seen_ids)}
+  {_section_html("🩹 Medical Assistant Roles — CMA Required", ma_req_active, seen_ids)}
+  {_section_html("🩹 Medical Assistant Roles — CMA Preferred / Not Required", ma_pref_active, seen_ids)}
   {_section_html("🩺 Physician Assistant Roles", pa_active, seen_ids)}
 
   <!-- Footer -->
@@ -788,18 +929,15 @@ def send_email(html_body: str) -> bool:
 def main() -> None:
     log.info("═══ Job Digest Agent — starting ═══")
 
-    # Load previous state
     state    = load_state()
     seen_ids: Set[str] = set(state.get("seen_job_ids", []))
     log.info(f"Loaded {len(seen_ids)} previously seen job IDs")
 
-    # Gather raw listings
     raw: List[Job] = []
     raw.extend(search_job_boards())
     raw.extend(scrape_employers())
     log.info(f"Total raw listings: {len(raw)}")
 
-    # Classify
     classified: List[Job] = []
     for j in raw:
         cat = classify(j.title, j.description, j.employment_type)
@@ -808,15 +946,12 @@ def main() -> None:
             classified.append(j)
     log.info(f"After classification: {len(classified)}")
 
-    # Distance filter
     in_range = [j for j in classified if j.within_range()]
     log.info(f"Within {MAX_DISTANCE_MILES} miles: {len(in_range)}")
 
-    # Date filter
     recent = [j for j in in_range if j.posted_within_days(DAYS_TO_SEARCH)]
     log.info(f"Posted within {DAYS_TO_SEARCH} days: {len(recent)}")
 
-    # Deduplicate
     seen_this_run: Set[str] = set()
     unique: List[Job] = []
     for j in recent:
@@ -825,14 +960,12 @@ def main() -> None:
             unique.append(j)
     log.info(f"Unique listings: {len(unique)}")
 
-    # Skip if nothing to report
     if not unique:
         log.info("No listings to report — skipping email")
         state["last_run"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
         return
 
-    # Split into new vs. already-seen
     def sort_key(j: Job):
         return j.posted_date or datetime.min.replace(tzinfo=timezone.utc)
 
@@ -840,7 +973,6 @@ def main() -> None:
     active_jobs = sorted([j for j in unique if j.job_id     in seen_ids], key=sort_key, reverse=True)
     log.info(f"New: {len(new_jobs)}  |  Previously active: {len(active_jobs)}")
 
-    # Build and send email
     html_body = build_email_html(new_jobs, active_jobs, seen_ids)
 
     if send_email(html_body):

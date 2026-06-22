@@ -50,7 +50,7 @@ except ImportError:
 # └─────────────────────────────────────────────────────────────────────────┘
 EMAIL_RECIPIENTS: List[str] = [
     "ChloeRittenhouse@gmail.com",
-    # "bcmurphy21@gmail.com",  # temporarily disabled for a test run; restore after
+    "bcmurphy21@gmail.com",
 ]
 
 EMAIL_SENDER  = "ChloeRittenhouse@gmail.com"

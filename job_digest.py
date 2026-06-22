@@ -50,7 +50,7 @@ except ImportError:
 # └─────────────────────────────────────────────────────────────────────────┘
 EMAIL_RECIPIENTS: List[str] = [
     "ChloeRittenhouse@gmail.com",
-    # "bcmurphy21@gmail.com",  # temporarily disabled for a test run; restore after
+    "bcmurphy21@gmail.com",
 ]
 
 EMAIL_SENDER  = "ChloeRittenhouse@gmail.com"
@@ -820,6 +820,25 @@ def _section_html(heading: str, jobs: List[Job], seen_ids: Set[str]) -> str:
 </div>"""
 
 
+def _ma_section_html(req_jobs: List[Job], pref_jobs: List[Job], seen_ids: Set[str]) -> str:
+    """Single Medical Assistant section with two credential sub-headers."""
+    def _sub(label: str, jobs: List[Job]) -> str:
+        if not jobs:
+            inner = '<p style="color:#6b7280;font-style:italic;font-size:13px;margin:0;">No listings at this time.</p>'
+        else:
+            inner = "".join(_job_card(j, j.job_id not in seen_ids) for j in jobs)
+        return (
+            f'<h4 style="margin:14px 0 8px;font-size:13px;font-weight:700;color:#374151;">{label}</h4>'
+            f'{inner}'
+        )
+    body = _sub("CMA Required", req_jobs) + _sub("CMA Preferred / Not Required", pref_jobs)
+    return f"""
+<div style="margin-bottom:26px;">
+  <h3 style="margin:0 0 12px;font-size:15px;font-weight:700;color:#111827;">\U0001FA79 Medical Assistant Roles</h3>
+  {body}
+</div>"""
+
+
 def build_email_html(new_jobs: List[Job], active_jobs: List[Job], seen_ids: Set[str]) -> str:
     today     = datetime.now(timezone.utc).strftime("%B %-d, %Y")
     emt_new        = [j for j in new_jobs    if j.category == "emt_clinical"]
@@ -862,20 +881,18 @@ def build_email_html(new_jobs: List[Job], active_jobs: List[Job], seen_ids: Set[
   <h2 style="font-size:17px;font-weight:700;margin:0 0 4px;color:#111827;">🆕 New Since Last Digest</h2>
   <p style="font-size:12px;color:#6b7280;margin:0 0 14px;">Listings added or updated since the previous run</p>
 
-  {_section_html("🚑 EMT / Clinical Roles", emt_new, seen_ids)}
+  {_section_html("🚑 EMT Roles", emt_new, seen_ids)}
   {_section_html("🚑 Paramedic Roles", para_new, seen_ids)}
-  {_section_html("🩹 Medical Assistant Roles — CMA Required", ma_req_new, seen_ids)}
-  {_section_html("🩹 Medical Assistant Roles — CMA Preferred / Not Required", ma_pref_new, seen_ids)}
+  {_ma_section_html(ma_req_new, ma_pref_new, seen_ids)}
   {_section_html("🩺 Physician Assistant Roles", pa_new, seen_ids)}
 
   <!-- ═══ SECTION 2: Active in the last 30 days ═══ -->
   <h2 style="font-size:17px;font-weight:700;margin:28px 0 4px;color:#111827;">📋 Active in the Last 30 Days</h2>
   <p style="font-size:12px;color:#6b7280;margin:0 0 14px;">Open listings from the past 30 days (previously reported)</p>
 
-  {_section_html("🚑 EMT / Clinical Roles", emt_active, seen_ids)}
+  {_section_html("🚑 EMT Roles", emt_active, seen_ids)}
   {_section_html("🚑 Paramedic Roles", para_active, seen_ids)}
-  {_section_html("🩹 Medical Assistant Roles — CMA Required", ma_req_active, seen_ids)}
-  {_section_html("🩹 Medical Assistant Roles — CMA Preferred / Not Required", ma_pref_active, seen_ids)}
+  {_ma_section_html(ma_req_active, ma_pref_active, seen_ids)}
   {_section_html("🩺 Physician Assistant Roles", pa_active, seen_ids)}
 
   <!-- Footer -->
